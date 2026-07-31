@@ -29,8 +29,9 @@ Design model (do not break these invariants):
 - `include/hamt/hamt.hpp` — the entire library
 - `tests/test_hamt.cpp` — unit tests (plain `CHECK(expr)` macro, no framework)
 - `CMakeLists.txt` — INTERFACE library target `hamt` + `hamt_tests` executable
-- `PersistentHashMap.java` — Clojure reference implementation (EPL-1.0),
-  reference only, not part of the library
+- `refs/PersistentHashMap.java` — Clojure reference implementation (EPL-1.0,
+  see `refs/epl-v10.html`), reference only, not part of the library
+- `LICENSE` — MIT license for the library itself
 - `README.md` — API and design documentation
 
 ## Build and test

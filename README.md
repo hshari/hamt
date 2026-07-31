@@ -11,9 +11,11 @@ either path-copy only the nodes they share with older versions.
 The design follows Phil Bagwell's HAMT as popularized by Clojure's
 `PersistentHashMap` (Rich Hickey), whose in-place "transient" mutation model
 (with an ownership marker instead of a generation counter) this library
-mirrors. `PersistentHashMap.java` in this directory is the reference
-implementation used to validate the algorithms; the C++ code is an original
-implementation.
+mirrors. `refs/PersistentHashMap.java` is the reference implementation (Eclipse
+Public License 1.0, see `refs/epl-v10.html`) used to validate the algorithms;
+the C++ code is an original implementation.
+
+The library itself is released under the MIT License (see `LICENSE`).
 
 ## Usage
 
