@@ -447,6 +447,40 @@ static void test_move()
     CHECK(n.contains(3));
     CHECK(m.empty());
 }
+
+static void test_move_generation_isolation()
+{
+    map_t m;
+    for (std::uint64_t i = 0; i < 10; ++i)
+        m.insert(i, i);
+    map_t n = std::move(m);
+    map_t snap = n.fork();
+    m.insert(100, 100);
+    n.insert(200, 200).insert(0, 42);
+    CHECK(snap.size() == 10);
+    CHECK(snap.find(0)->second == 0);
+    CHECK(!snap.contains(100));
+    CHECK(!snap.contains(200));
+    CHECK(n.size() == 11);
+    CHECK(n.find(0)->second == 42);
+    CHECK(m.size() == 1);
+    CHECK(m.contains(100));
+    CHECK(!m.contains(0));
+    map_t a;
+    a.insert(1, 1).insert(2, 2);
+    map_t b;
+    b = std::move(a);
+    map_t b_snap = b.fork();
+    a.insert(3, 3);
+    b.insert(1, 10);
+    CHECK(b_snap.size() == 2);
+    CHECK(b_snap.find(1)->second == 1);
+    CHECK(!b_snap.contains(3));
+    CHECK(b.find(1)->second == 10);
+    CHECK(a.size() == 1);
+    CHECK(a.contains(3));
+}
+
 static void test_random_stress()
 {
     std::mt19937_64 rng(20260731);
@@ -557,6 +591,7 @@ int main()
     test_equality();
     test_iterator_snapshot_stability();
     test_move();
+    test_move_generation_isolation();
     test_random_stress();
     test_string_keys();
     test_vector_value();

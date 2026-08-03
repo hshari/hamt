@@ -456,6 +456,7 @@ public:    class const_iterator
         : root_(std::move(other.root_)), size_(other.size_), gen_(other.gen_)
     {
         other.size_ = 0;
+        other.gen_ = 0;
     }
 
     hamt_map& operator=(hamt_map&& other) noexcept
@@ -465,6 +466,7 @@ public:    class const_iterator
             size_ = other.size_;
             gen_ = other.gen_;
             other.size_ = 0;
+            other.gen_ = 0;
         }
         return *this;
     }
