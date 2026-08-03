@@ -12,6 +12,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -59,6 +60,7 @@ requires std::copy_constructible<Key> && std::copy_constructible<Value>
     && std::predicate<Equal, const Key&, const Key&>
     && std::invocable<Hash, const Key&>
     && std::convertible_to<std::invoke_result_t<Hash, const Key&>, std::uint64_t>
+    && std::is_empty_v<Hash> && std::is_empty_v<Equal>
 class hamt_map
 {
 public:

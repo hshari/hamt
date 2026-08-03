@@ -64,6 +64,8 @@ cmake --build build-clang && ctest --test-dir build-clang
   on failure.
 - Keys/values are copy-constructible; `Hash` must be default-constructible,
   invocable with `const Key&`, and its result convertible to `std::uint64_t`.
+  `Hash` and `Equal` must be stateless (empty classes); the map calls
+  default-constructed instances.
 - Iterators are invalidated by mutations of the map they came from; iterators
   into a forked map stay valid while other maps mutate.
 - `PersistentHashMap.java` must keep its EPL license header; never modify it.

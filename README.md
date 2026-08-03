@@ -55,7 +55,8 @@ moved-from map is left empty.
 
 Requirements: `Key` and `Value` copy-constructible; `Hash` default-constructible,
 invocable with `const Key&`, result convertible to `std::uint64_t`; `Equal`
-a strict predicate on `const Key&`.
+a strict predicate on `const Key&`. Both `Hash` and `Equal` must be stateless
+(empty classes): the map calls default-constructed instances of them.
 
 ## How generations work
 

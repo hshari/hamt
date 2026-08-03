@@ -44,6 +44,25 @@ static_assert(std::is_same_v<map_t::value_type, std::pair<const std::uint64_t, s
 static_assert(std::forward_iterator<map_t::const_iterator>);
 static_assert(std::ranges::input_range<map_t>);
 
+struct stateful_hash
+{
+    int state = 0;
+    std::uint64_t operator()(std::uint64_t k) const noexcept { return k + static_cast<std::uint64_t>(state); }
+};
+
+template <typename T, typename = void>
+struct map_accepts : std::false_type
+{
+};
+
+template <typename T>
+struct map_accepts<T, std::void_t<hamt::hamt_map<std::uint64_t, std::uint64_t, T>>> : std::true_type
+{
+};
+
+static_assert(!map_accepts<stateful_hash>::value);
+static_assert(map_accepts<identity_hash>::value);
+
 static std::uint64_t unmix64(std::uint64_t z) noexcept
 {
     z = (z ^ (z >> 31) ^ (z >> 62)) * 0x319642b2d24d8ec3ull;
