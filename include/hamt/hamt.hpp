@@ -26,16 +26,17 @@ constexpr std::uint64_t mix64(std::uint64_t z) noexcept
     return z ^ (z >> 31);
 }
 
-inline constexpr std::size_t k_levels = 12;
+inline constexpr std::size_t k_wide_levels = 12;
+inline constexpr std::size_t k_levels = k_wide_levels + 1;
 
 constexpr std::uint32_t shift_for(std::size_t depth) noexcept
 {
-    return depth < k_levels ? static_cast<std::uint32_t>(59 - 5 * depth) : 0u;
+    return depth < k_wide_levels ? static_cast<std::uint32_t>(59 - 5 * depth) : 0u;
 }
 
 constexpr std::uint32_t mask_for(std::size_t depth) noexcept
 {
-    return depth < k_levels ? 0x1Fu : 0x0Fu;
+    return depth < k_wide_levels ? 0x1Fu : 0x0Fu;
 }
 
 constexpr std::uint32_t slot_for(std::uint64_t hash, std::size_t depth) noexcept

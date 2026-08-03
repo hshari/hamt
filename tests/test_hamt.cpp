@@ -44,6 +44,13 @@ static_assert(std::is_same_v<map_t::value_type, std::pair<const std::uint64_t, s
 static_assert(std::forward_iterator<map_t::const_iterator>);
 static_assert(std::ranges::input_range<map_t>);
 
+static std::uint64_t unmix64(std::uint64_t z) noexcept
+{
+    z = (z ^ (z >> 31) ^ (z >> 62)) * 0x319642b2d24d8ec3ull;
+    z = (z ^ (z >> 27) ^ (z >> 54)) * 0x96de1b173f119089ull;
+    return z ^ (z >> 30) ^ (z >> 60);
+}
+
 static void test_empty()
 {
     map_t m;
@@ -273,20 +280,27 @@ static void test_split()
 
 static void test_last_level()
 {
-    const std::uint64_t base = 0x123456789ABCDEF0ull;
+    const std::uint64_t base = 0xFFFFFFFFFFFFFFF0ull;
     map_t m;
-    for (unsigned i = 0; i < 16; ++i)
-        m.insert(base + i, i);
+    for (std::uint64_t i = 0; i < 16; ++i) {
+        CHECK(unmix64(mix64(i)) == i);
+        CHECK(unmix64(mix64(base + i)) == base + i);
+        m.insert(unmix64(base + i), i);
+    }
     CHECK(m.size() == 16);
+    std::uint64_t expect = 0;
+    for (const auto& kv : m)
+        CHECK(kv.second == expect++);
+    CHECK(expect == 16);
     for (unsigned i = 0; i < 16; ++i) {
-        CHECK(m.contains(base + i));
-        CHECK(m.find(base + i)->second == i);
+        CHECK(m.contains(unmix64(base + i)));
+        CHECK(m.find(unmix64(base + i))->second == i);
     }
     for (unsigned i = 0; i < 16; i += 2)
-        m.erase(base + i);
+        m.erase(unmix64(base + i));
     CHECK(m.size() == 8);
     for (unsigned i = 0; i < 16; ++i)
-        CHECK(m.contains(base + i) == (i % 2 == 1));
+        CHECK(m.contains(unmix64(base + i)) == (i % 2 == 1));
 }
 
 static void test_custom_equal()
