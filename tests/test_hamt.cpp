@@ -21,13 +21,6 @@ static int g_failures = 0;
         }                                                                    \
     } while (0)
 
-static std::uint64_t mix64(std::uint64_t z) noexcept
-{
-    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
-    z = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
-    return z ^ (z >> 31);
-}
-
 struct identity_hash
 {
     std::uint64_t operator()(std::uint64_t k) const noexcept { return k; }
@@ -215,8 +208,8 @@ static void test_iteration_order()
         CHECK(ref.count(it->first) == 1);
         CHECK(ref.at(it->first) == it->second);
         if (!prev_hashes.empty())
-            CHECK(mix64(it->first) > prev_hashes.back());
-        prev_hashes.push_back(mix64(it->first));
+            CHECK(hamt::detail::mix64(it->first) > prev_hashes.back());
+        prev_hashes.push_back(hamt::detail::mix64(it->first));
     }
     CHECK(keys.size() == ref.size());
     CHECK(m.size() == ref.size());
@@ -304,8 +297,8 @@ static void test_last_level()
     const std::uint64_t base = 0xFFFFFFFFFFFFFFF0ull;
     map_t m;
     for (std::uint64_t i = 0; i < 16; ++i) {
-        CHECK(unmix64(mix64(i)) == i);
-        CHECK(unmix64(mix64(base + i)) == base + i);
+        CHECK(unmix64(hamt::detail::mix64(i)) == i);
+        CHECK(unmix64(hamt::detail::mix64(base + i)) == base + i);
         m.insert(unmix64(base + i), i);
     }
     CHECK(m.size() == 16);
@@ -448,7 +441,7 @@ static void test_iterator_snapshot_stability()
         collected.push_back(i1->first);
     std::vector<std::uint64_t> expected;
     for (std::uint64_t i = 0; i < 100; ++i)
-        if (mix64(i) >= mix64(50))
+        if (hamt::detail::mix64(i) >= hamt::detail::mix64(50))
             expected.push_back(i);
     std::sort(expected.begin(), expected.end());
     std::sort(collected.begin(), collected.end());
