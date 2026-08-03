@@ -230,7 +230,9 @@ static void test_iteration_order()
         ++n;
     }
     CHECK(n == m.size());
-}static void test_collision_bucket()
+}
+
+static void test_collision_bucket()
 {
     struct zero_hash
     {

@@ -93,6 +93,10 @@ Generations are counted in a `std::uint64_t`, capping a map's lineage at
 - A map is single-writer: do not mutate it from two threads at once. Read-only
   operations (`find`, `contains`, iteration) on a map that is not being
   mutated are safe.
+- `insert` and `erase` provide the basic exception guarantee: on a failed
+  allocation the map stays valid and unchanged, though the pass-by-value
+  arguments may already have been moved from. Replacing an existing value
+  leaves the old one moved-from if the `Value` move assignment itself throws.
 - The empty map has a null root; no node allocation happens until the first
   insert.
 
