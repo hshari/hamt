@@ -565,44 +565,28 @@ public:    class const_iterator
         if (root_ == nullptr)
             return const_iterator();
         const std::uint64_t h = hash_of(k);
+        const find_result hit = find_in(root_.get(), h, k);
+        if (hit.node == nullptr)
+            return const_iterator();
         std::vector<frame> path;
-        node_ptr n = root_;
-        for (;;) {
-            switch (n->kind) {
-            case node::kind_t::bitmap: {
-                const bitmap_node* bm = as_bitmap(n);
-                const std::uint32_t bit = detail::bit_for(h, bm->depth);
-                if ((bm->bitmap & bit) == 0)
-                    return const_iterator();
-                const std::size_t pos =
-                    static_cast<std::size_t>(std::popcount(bm->bitmap & (bit - 1)));
-                path.push_back(frame{n, pos});
-                n = bm->children[pos];
-                break;
-            }
-            case node::kind_t::leaf: {
-                const leaf_node* leaf = as_leaf(n);
-                if (Equal{}(k, leaf->key))
-                    return const_iterator(std::move(path), std::move(n), 0);
-                return const_iterator();
-            }
-            case node::kind_t::collision: {
-                const collision_node* col = as_collision(n);
-                for (std::size_t i = 0; i < col->entries.size(); ++i) {
-                    if (Equal{}(k, col->entries[i].first))
-                        return const_iterator(std::move(path), std::move(n), i);
-                }
-                return const_iterator();
-            }
-            }
+        node_ptr cur = root_;
+        while (cur.get() != hit.node) {
+            const bitmap_node* bm = as_bitmap(cur);
+            const std::uint32_t bit = detail::bit_for(h, bm->depth);
+            const std::size_t pos =
+                static_cast<std::size_t>(std::popcount(bm->bitmap & (bit - 1)));
+            node_ptr next = bm->children[pos];
+            path.push_back(frame{std::move(cur), pos});
+            cur = std::move(next);
         }
+        return const_iterator(std::move(path), std::move(cur), hit.entry);
     }
 
     [[nodiscard]] bool contains(const Key& k) const
     {
         if (root_ == nullptr)
             return false;
-        return find_in(root_, hash_of(k), k).node != nullptr;
+        return find_in(root_.get(), hash_of(k), k).node != nullptr;
     }
 
     [[nodiscard]] size_type count(const Key& k) const
@@ -646,33 +630,32 @@ public:    class const_iterator
 private:
     struct find_result
     {
-        node_ptr node;
+        const node* node = nullptr;
         std::size_t entry = 0;
     };
 
-    static find_result find_in(const node_ptr& n, std::uint64_t h, const Key& k)
+    static find_result find_in(const node* cur, std::uint64_t h, const Key& k)
     {
-        node_ptr cur = n;
         for (;;) {
             switch (cur->kind) {
             case node::kind_t::bitmap: {
-                const bitmap_node* bm = as_bitmap(cur);
+                const auto* bm = static_cast<const bitmap_node*>(cur);
                 const std::uint32_t bit = detail::bit_for(h, bm->depth);
                 if ((bm->bitmap & bit) == 0)
                     return {};
                 const std::size_t pos =
                     static_cast<std::size_t>(std::popcount(bm->bitmap & (bit - 1)));
-                cur = bm->children[pos];
+                cur = bm->children[pos].get();
                 break;
             }
             case node::kind_t::leaf: {
-                const leaf_node* leaf = as_leaf(cur);
+                const auto* leaf = static_cast<const leaf_node*>(cur);
                 if (Equal{}(k, leaf->key))
                     return {cur, 0};
                 return {};
             }
             case node::kind_t::collision: {
-                const collision_node* col = as_collision(cur);
+                const auto* col = static_cast<const collision_node*>(cur);
                 for (std::size_t i = 0; i < col->entries.size(); ++i) {
                     if (Equal{}(k, col->entries[i].first))
                         return {cur, i};
