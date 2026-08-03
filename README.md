@@ -72,6 +72,9 @@ either map's generation. From then on each map clones before writing, keeping
 the two fully independent. Between forks, repeated mutations touch only the
 map's private nodes and do no copying at all.
 
+Generations are counted in a `std::uint64_t`, capping a map's lineage at
+2^64 forks; in Debug builds `fork()` asserts before the counter could wrap.
+
 ## Properties
 
 - Expected O(log32 n) lookup, insert, and erase; bounded by 13 levels

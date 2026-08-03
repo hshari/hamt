@@ -9,6 +9,7 @@
 #include <functional>
 #include <initializer_list>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -496,6 +497,7 @@ public:    class const_iterator
 
     [[nodiscard]] hamt_map fork() noexcept
     {
+        assert(gen_ != (std::numeric_limits<std::uint64_t>::max)());
         ++gen_;
         return hamt_map(root_, size_, gen_);
     }
