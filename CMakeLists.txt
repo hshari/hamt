@@ -14,6 +14,7 @@ target_include_directories(hamt INTERFACE
 target_compile_features(hamt INTERFACE cxx_std_20)
 
 option(HAMT_BUILD_TESTS "Build the hamt test suite" ON)
+option(HAMT_BUILD_BENCHMARKS "Build the hamt benchmark suite" OFF)
 
 install(DIRECTORY include/hamt DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(TARGETS hamt EXPORT hamtTargets)
@@ -43,4 +44,14 @@ if(HAMT_BUILD_TESTS)
         target_compile_options(hamt_tests PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME hamt_tests COMMAND hamt_tests)
+endif()
+
+if(HAMT_BUILD_BENCHMARKS)
+    add_executable(hamt_bench bench/bench_hamt.cpp)
+    target_link_libraries(hamt_bench PRIVATE hamt)
+    if(MSVC)
+        target_compile_options(hamt_bench PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(hamt_bench PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
 endif()

@@ -137,3 +137,24 @@ splits and collapses, the final hash level, custom hash/equality,
 non-comparable values, iteration order, iterator stability across forks, move
 semantics, and randomized stress tests against `std::unordered_map` and
 `std::unordered_set` with forked snapshots.
+
+## Benchmarks
+
+`bench/bench_hamt.cpp` builds a standalone `hamt_bench` executable that
+compares `hamt_map` against `std::unordered_map`. The workload mirrors the
+benchmarks from Martin Ankerl's
+[Comprehensive C++ Hashmap Benchmarks 2022](https://martin.ankerl.com/2022/08/27/hashmap-bench-01/):
+random insert & access and random insert & erase (uint64_t keys), bulk insert
+then erase, iterate, find at 0–100% hit rates for small and large maps, the
+same variants for `std::string` keys, and a fork/copy benchmark (`fork()`
+stands in for copy, since the map is move-only). Each benchmark is timed over
+three repetitions and reports the median; a checksum keeps the compiler from
+optimizing the work away.
+
+```sh
+cmake -S . -B build -DHAMT_BUILD_BENCHMARKS=ON
+cmake --build build --config Release --target hamt_bench
+./build/Release/hamt_bench            # full suite
+./build/Release/hamt_bench --quick    # scaled-down workloads
+./build/Release/hamt_bench find       # only benchmarks matching "find"
+```
