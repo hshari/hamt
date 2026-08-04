@@ -7,6 +7,8 @@ A `hamt::hamt_map` is a mutable, non-copyable map with transient semantics:
 enforced per generation. `fork()` cheaply duplicates a map; both the original
 and the copy advance to a fresh generation, so subsequent modifications of
 either path-copy only the nodes they share with older versions.
+`hamt::hamt_set` is the key-only counterpart with the same semantics; both
+containers share a single trie implementation.
 
 The design follows Phil Bagwell's HAMT as popularized by Clojure's
 `PersistentHashMap` (Rich Hickey), whose in-place "transient" mutation model
@@ -57,6 +59,26 @@ Requirements: `Key` and `Value` copy-constructible; `Hash` default-constructible
 invocable with `const Key&`, result convertible to `std::uint64_t`; `Equal`
 a strict predicate on `const Key&`. Both `Hash` and `Equal` must be stateless
 (empty classes): the map calls default-constructed instances of them.
+
+## API (set)
+
+`hamt::hamt_set<Key, Hash = std::hash<Key>, Equal = std::equal_to<Key>>`
+
+| Member | Description |
+| --- | --- |
+| `insert(Key)` | Inserts the key, mutating the set in place. Returns `*this` for chaining. No-op if the key is already present. |
+| `erase(Key)` | Removes the key, mutating the set in place. Returns `*this`. No-op if the key is absent. |
+| `fork()` | Returns a new set sharing the current structure and advances both sets to a fresh generation. O(1). |
+| `find(Key)` | Iterator to the key, or `end()` |
+| `contains(Key)`, `count(Key)` | Membership tests |
+| `size()`, `empty()` | Number of keys |
+| `begin()`, `end()` | Forward iterators over `const Key` |
+| `operator==`, `operator!=` | Content equality |
+| `swap` | Constant-time |
+
+Construct from `std::initializer_list` or any key-valued input range. The set
+is non-copyable and move-only, with the same requirements on `Key`, `Hash`,
+and `Equal` as the map.
 
 ## How generations work
 
@@ -111,5 +133,5 @@ ctest --test-dir build -C Release --output-on-failure
 The test suite covers fork semantics, version chains, collision buckets, node
 splits and collapses, the final hash level, custom hash/equality,
 non-comparable values, iteration order, iterator stability across forks, move
-semantics, and a randomized stress test against `std::unordered_map` with
-forked snapshots.
+semantics, and randomized stress tests against `std::unordered_map` and
+`std::unordered_set` with forked snapshots.

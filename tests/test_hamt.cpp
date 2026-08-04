@@ -8,6 +8,7 @@
 #include <string>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -55,6 +56,30 @@ struct map_accepts<T, std::void_t<hamt::hamt_map<std::uint64_t, std::uint64_t, T
 
 static_assert(!map_accepts<stateful_hash>::value);
 static_assert(map_accepts<identity_hash>::value);
+
+using set_t = hamt::hamt_set<std::uint64_t, identity_hash>;
+
+static_assert(!std::is_copy_constructible_v<set_t>);
+static_assert(!std::is_copy_assignable_v<set_t>);
+static_assert(std::is_move_constructible_v<set_t>);
+static_assert(std::is_nothrow_move_constructible_v<set_t>);
+static_assert(std::is_default_constructible_v<set_t>);
+static_assert(std::is_same_v<set_t::value_type, std::uint64_t>);
+static_assert(std::forward_iterator<set_t::const_iterator>);
+static_assert(std::ranges::input_range<set_t>);
+
+template <typename T, typename = void>
+struct set_accepts : std::false_type
+{
+};
+
+template <typename T>
+struct set_accepts<T, std::void_t<hamt::hamt_set<std::uint64_t, T>>> : std::true_type
+{
+};
+
+static_assert(!set_accepts<stateful_hash>::value);
+static_assert(set_accepts<identity_hash>::value);
 
 static std::uint64_t unmix64(std::uint64_t z) noexcept
 {
@@ -600,6 +625,359 @@ static void test_vector_value()
     CHECK(m.find(1)->second == std::vector<int>({9}));
 }
 
+static void test_set_empty()
+{
+    set_t s;
+    CHECK(s.empty());
+    CHECK(s.size() == 0);
+    CHECK(s.begin() == s.end());
+    CHECK(s.find(1) == s.end());
+    CHECK(!s.contains(1));
+    CHECK(s.count(1) == 0);
+    s.erase(42);
+    CHECK(s.empty());
+}
+
+static void test_set_basic()
+{
+    set_t s;
+    for (std::uint64_t i = 0; i < 1000; ++i)
+        s.insert(i);
+    CHECK(s.size() == 1000);
+    for (std::uint64_t i = 0; i < 1000; ++i) {
+        CHECK(s.contains(i));
+        const auto it = s.find(i);
+        CHECK(it != s.end());
+        CHECK(*it == i);
+    }
+    CHECK(s.find(1000) == s.end());
+    CHECK(!s.contains(1000));
+    for (std::uint64_t i = 0; i < 1000; ++i)
+        s.insert(i);
+    CHECK(s.size() == 1000);
+}
+
+static void test_set_fork()
+{
+    set_t base;
+    base.insert(1).insert(2).insert(3);
+    set_t a = base.fork();
+    a.insert(4);
+    CHECK(a.contains(4));
+    CHECK(!base.contains(4));
+    CHECK(base.size() == 3);
+    CHECK(a.size() == 4);
+    set_t b = base.fork();
+    b.erase(2);
+    CHECK(!b.contains(2));
+    CHECK(base.contains(2));
+    CHECK(b.size() == 2);
+    set_t chain;
+    std::vector<set_t> versions;
+    for (std::uint64_t i = 0; i < 64; ++i) {
+        chain.insert(i);
+        versions.push_back(chain.fork());
+    }
+    for (std::size_t v = 0; v < versions.size(); ++v) {
+        CHECK(versions[v].size() == v + 1);
+        for (std::uint64_t i = 0; i <= v; ++i)
+            CHECK(versions[v].contains(i));
+        CHECK(!versions[v].contains(v + 1));
+    }
+}
+
+static void test_set_erase()
+{
+    set_t s;
+    for (std::uint64_t i = 0; i < 500; ++i)
+        s.insert(i);
+    s.erase(0);
+    s.erase(250);
+    s.erase(499);
+    CHECK(s.size() == 497);
+    CHECK(!s.contains(0));
+    CHECK(!s.contains(250));
+    CHECK(!s.contains(499));
+    CHECK(s.contains(1));
+    s.erase(12345);
+    CHECK(s.size() == 497);
+    set_t e = s.fork();
+    while (!e.empty())
+        e.erase(*e.begin());
+    CHECK(e.empty());
+    CHECK(e.begin() == e.end());
+    e.insert(9);
+    CHECK(e.size() == 1);
+    CHECK(e.contains(9));
+}
+
+static void test_set_collision_bucket()
+{
+    struct zero_hash
+    {
+        std::uint64_t operator()(std::uint64_t) const noexcept { return 0; }
+    };
+    hamt::hamt_set<std::uint64_t, zero_hash> s;
+    for (std::uint64_t i = 0; i < 1000; ++i)
+        s.insert(i);
+    CHECK(s.size() == 1000);
+    for (std::uint64_t i = 0; i < 1000; ++i)
+        CHECK(s.contains(i));
+    CHECK(!s.contains(1001));
+    for (std::uint64_t i = 0; i < 500; i += 2)
+        s.erase(i);
+    CHECK(s.size() == 750);
+    CHECK(!s.contains(0));
+    CHECK(s.contains(1));
+    std::size_t count = 0;
+    std::vector<std::uint64_t> seen;
+    for (const auto& k : s) {
+        ++count;
+        seen.push_back(k);
+    }
+    CHECK(count == 750);
+    std::sort(seen.begin(), seen.end());
+    CHECK(std::adjacent_find(seen.begin(), seen.end()) == seen.end());
+    while (s.size() > 1)
+        s.erase(*s.begin());
+    CHECK(s.size() == 1);
+    CHECK(*s.begin() == 999);
+}
+
+static void test_set_iteration_order()
+{
+    std::mt19937_64 rng(54321);
+    set_t s;
+    std::unordered_set<std::uint64_t> ref;
+    for (int i = 0; i < 20000; ++i) {
+        const std::uint64_t k = rng();
+        s.insert(k);
+        ref.insert(k);
+    }
+    std::vector<std::uint64_t> keys;
+    std::vector<std::uint64_t> prev_hashes;
+    for (auto it = s.begin(); it != s.end(); ++it) {
+        keys.push_back(*it);
+        CHECK(ref.count(*it) == 1);
+        if (!prev_hashes.empty())
+            CHECK(hamt::detail::mix64(*it) > prev_hashes.back());
+        prev_hashes.push_back(hamt::detail::mix64(*it));
+    }
+    CHECK(keys.size() == ref.size());
+    std::size_t n = 0;
+    for (const auto& k : s) {
+        (void)k;
+        ++n;
+    }
+    CHECK(n == s.size());
+}
+
+static void test_set_constructors()
+{
+    set_t s{1, 2, 3, 2, 1};
+    CHECK(s.size() == 3);
+    CHECK(s.contains(2));
+    const std::vector<std::uint64_t> v{10, 11, 10};
+    set_t s2(v.begin(), v.end());
+    CHECK(s2.size() == 2);
+    CHECK(s2.contains(11));
+}
+
+static void test_set_swap()
+{
+    set_t a;
+    a.insert(1).insert(2);
+    set_t b;
+    b.insert(10);
+    swap(a, b);
+    CHECK(a.size() == 1 && a.contains(10));
+    CHECK(b.size() == 2 && b.contains(1) && b.contains(2));
+    a.swap(b);
+    CHECK(a.size() == 2 && a.contains(1));
+    CHECK(b.size() == 1 && b.contains(10));
+}
+
+static void test_set_equality()
+{
+    set_t a;
+    a.insert(1).insert(2).insert(3);
+    set_t b;
+    b.insert(3).insert(2).insert(1);
+    CHECK(a == b);
+    CHECK(!(a != b));
+    set_t c = a.fork();
+    CHECK(c == a);
+    c.insert(4);
+    CHECK(c != a);
+    c.erase(4);
+    CHECK(c == a);
+    a.erase(3);
+    CHECK(a != b);
+    b.erase(3);
+    CHECK(a == b);
+    set_t empty1;
+    set_t empty2;
+    CHECK(empty1 == empty2);
+}
+
+static void test_set_move()
+{
+    set_t s;
+    s.insert(1).insert(2);
+    set_t t = std::move(s);
+    CHECK(t.size() == 2);
+    CHECK(t.contains(1));
+    CHECK(s.empty());
+    s.insert(3);
+    CHECK(s.size() == 1);
+    CHECK(!t.contains(3));
+    t = std::move(s);
+    CHECK(t.size() == 1);
+    CHECK(t.contains(3));
+    CHECK(s.empty());
+    set_t m;
+    for (std::uint64_t i = 0; i < 10; ++i)
+        m.insert(i);
+    set_t n = std::move(m);
+    set_t snap = n.fork();
+    m.insert(100);
+    n.insert(200);
+    CHECK(snap.size() == 10);
+    CHECK(!snap.contains(100));
+    CHECK(!snap.contains(200));
+    CHECK(n.size() == 11);
+    CHECK(m.size() == 1);
+    CHECK(m.contains(100));
+}
+
+static void test_set_custom_equal()
+{
+    struct key
+    {
+        int group;
+        int id;
+        bool operator==(const key&) const = default;
+    };
+    struct key_hash
+    {
+        std::uint64_t operator()(const key& k) const noexcept
+        {
+            return static_cast<std::uint64_t>(k.group);
+        }
+    };
+    struct key_equal
+    {
+        bool operator()(const key& a, const key& b) const noexcept
+        {
+            return a.group == b.group;
+        }
+    };
+    using s_t = hamt::hamt_set<key, key_hash, key_equal>;
+    s_t s;
+    s.insert(key{1, 10});
+    s.insert(key{2, 20});
+    s.insert(key{1, 99});
+    CHECK(s.size() == 2);
+    CHECK(s.contains(key{1, 12345}));
+    CHECK(s.find(key{2, 7}) != s.end());
+    s.erase(key{2, -1});
+    CHECK(!s.contains(key{2, 42}));
+    CHECK(s.size() == 1);
+}
+
+static void test_set_string_keys()
+{
+    hamt::hamt_set<std::string> s;
+    s.insert("alpha");
+    s.insert("beta");
+    s.insert("alpha");
+    CHECK(s.size() == 2);
+    CHECK(s.contains("alpha"));
+    s.erase("alpha");
+    CHECK(s.size() == 1);
+    CHECK(!s.contains("alpha"));
+    CHECK(s.contains("beta"));
+}
+
+static void test_set_snapshot_stability()
+{
+    set_t s;
+    for (std::uint64_t i = 0; i < 100; ++i)
+        s.insert(i);
+    set_t snap = s.fork();
+    const auto it = snap.find(50);
+    CHECK(it != snap.end());
+    CHECK(*it == 50);
+    s.insert(1000);
+    s.erase(5);
+    std::vector<std::uint64_t> collected;
+    for (auto i1 = it; i1 != snap.end(); ++i1)
+        collected.push_back(*i1);
+    std::vector<std::uint64_t> expected;
+    for (std::uint64_t i = 0; i < 100; ++i)
+        if (hamt::detail::mix64(i) >= hamt::detail::mix64(50))
+            expected.push_back(i);
+    std::sort(expected.begin(), expected.end());
+    std::sort(collected.begin(), collected.end());
+    CHECK(collected == expected);
+    CHECK(s.size() == 100);
+    CHECK(snap.size() == 100);
+    CHECK(snap.contains(5));
+    CHECK(!snap.contains(1000));
+}
+
+static void test_set_random_stress()
+{
+    std::mt19937_64 rng(20260804);
+    using ref_t = std::unordered_set<std::uint64_t>;
+    set_t s;
+    ref_t ref;
+    std::vector<std::pair<set_t, ref_t>> snapshots;
+    const std::uint64_t ops = 200000;
+    for (std::uint64_t i = 0; i < ops; ++i) {
+        const std::uint64_t k = rng();
+        switch (i % 4) {
+        case 0:
+        case 1:
+            s.insert(k);
+            ref.insert(k);
+            break;
+        case 2:
+            s.erase(k);
+            ref.erase(k);
+            break;
+        default: {
+            const bool in_set = s.contains(k);
+            const bool in_ref = ref.count(k) != 0;
+            CHECK(in_set == in_ref);
+            if (in_set) {
+                CHECK(*s.find(k) == k);
+                CHECK(s.count(k) == 1);
+            }
+            break;
+        }
+        }
+        if (i % 5000 == 4999) {
+            CHECK(s.size() == ref.size());
+            snapshots.emplace_back(s.fork(), ref);
+        }
+    }
+    CHECK(s.size() == ref.size());
+    for (const auto k : s)
+        CHECK(ref.count(k) == 1);
+    std::size_t counted = 0;
+    for (const auto k : ref) {
+        CHECK(s.contains(k));
+        ++counted;
+    }
+    CHECK(counted == s.size());
+    for (auto& [snap, snap_ref] : snapshots) {
+        CHECK(snap.size() == snap_ref.size());
+        for (const auto k : snap)
+            CHECK(snap_ref.count(k) == 1);
+    }
+}
+
 int main()
 {
     test_empty();
@@ -623,6 +1001,20 @@ int main()
     test_random_stress();
     test_string_keys();
     test_vector_value();
+    test_set_empty();
+    test_set_basic();
+    test_set_fork();
+    test_set_erase();
+    test_set_collision_bucket();
+    test_set_iteration_order();
+    test_set_constructors();
+    test_set_swap();
+    test_set_equality();
+    test_set_move();
+    test_set_custom_equal();
+    test_set_string_keys();
+    test_set_snapshot_stability();
+    test_set_random_stress();
     if (g_failures == 0)
         std::printf("All tests passed.\n");
     else

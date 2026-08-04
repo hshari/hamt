@@ -50,32 +50,78 @@ constexpr std::uint32_t bit_for(std::uint64_t hash, std::size_t depth) noexcept
     return 1u << slot_for(hash, depth);
 }
 
-} // namespace detail
+template <typename Key, typename Value>
+struct map_traits
+{
+    using entry = std::pair<Key, Value>;
+    using exposed = std::pair<const Key, Value>;
 
-template <typename Key,
-          typename Value,
-          typename Hash = std::hash<Key>,
-          typename Equal = std::equal_to<Key>>
-requires std::copy_constructible<Key> && std::copy_constructible<Value>
-    && std::predicate<Equal, const Key&, const Key&>
-    && std::invocable<Hash, const Key&>
-    && std::convertible_to<std::invoke_result_t<Hash, const Key&>, std::uint64_t>
-    && std::is_empty_v<Hash> && std::is_empty_v<Equal>
-class hamt_map
+    static constexpr bool updates_value = true;
+
+    static constexpr bool value_comparable = requires(const Value& a, const Value& b) {
+        { a == b } -> std::convertible_to<bool>;
+    };
+
+    static const Key& key_of(const entry& e) noexcept
+    {
+        return e.first;
+    }
+
+    static const Key& key_of(const exposed& e) noexcept
+    {
+        return e.first;
+    }
+
+    static bool same_value(const Value& a, const Value& b)
+    {
+        return a == b;
+    }
+
+    template <typename V>
+    static entry replace_value(const entry& existing, V&& v)
+    {
+        return entry(existing.first, std::forward<V>(v));
+    }
+
+    template <typename V>
+    static void assign_value(entry& e, V&& v)
+    {
+        e.second = std::forward<V>(v);
+    }
+};
+
+template <typename Key>
+struct set_traits
+{
+    using entry = Key;
+    using exposed = Key;
+
+    static constexpr bool updates_value = false;
+
+    static constexpr bool value_comparable = false;
+
+    static const Key& key_of(const entry& e) noexcept
+    {
+        return e;
+    }
+};
+
+template <typename Key, typename Hash, typename Equal, typename Traits, typename Derived>
+class hamt_common
 {
 public:
     using key_type = Key;
-    using mapped_type = Value;
-    using value_type = std::pair<const Key, Value>;
+    using value_type = typename Traits::exposed;
     using size_type = std::size_t;
     using difference_type = std::ptrdiff_t;
     using hash_type = Hash;
     using equal_type = Equal;
 
-private:
+protected:
+    using entry_type = typename Traits::entry;
+    using exposed_type = typename Traits::exposed;
     struct node;
     using node_ptr = std::shared_ptr<node>;
-    using entry_pair = std::pair<Key, Value>;
 
     struct node
     {
@@ -91,17 +137,16 @@ private:
     struct leaf_node final : node
     {
         const std::uint64_t hash;
-        const Key key;
-        Value value;
-        leaf_node(std::uint64_t g, std::uint64_t h, Key k, Value v)
-            : node(node::kind_t::leaf, g), hash(h), key(std::move(k)), value(std::move(v)) {}
+        entry_type entry;
+        leaf_node(std::uint64_t g, std::uint64_t h, entry_type e)
+            : node(node::kind_t::leaf, g), hash(h), entry(std::move(e)) {}
     };
 
     struct collision_node final : node
     {
         const std::uint64_t hash;
-        std::vector<entry_pair> entries;
-        collision_node(std::uint64_t g, std::uint64_t h, std::vector<entry_pair> es)
+        std::vector<entry_type> entries;
+        collision_node(std::uint64_t g, std::uint64_t h, std::vector<entry_type> es)
             : node(node::kind_t::collision, g), hash(h), entries(std::move(es)) {}
     };
 
@@ -134,10 +179,6 @@ private:
         return detail::mix64(static_cast<std::uint64_t>(Hash{}(k)));
     }
 
-    static constexpr bool values_comparable_v = requires(const Value& a, const Value& b) {
-        { a == b } -> std::convertible_to<bool>;
-    };
-
     struct frame
     {
         node_ptr parent;
@@ -149,70 +190,81 @@ private:
     };
 
     static node_ptr ins(node_ptr n, std::uint64_t h, std::size_t depth,
-                        Key k, Value v, std::uint64_t gen, bool& added, bool& changed)
+                        entry_type e, std::uint64_t gen, bool& added, bool& changed)
     {
+        const Key& k = Traits::key_of(e);
         switch (n->kind) {
         case node::kind_t::leaf: {
             leaf_node* leaf = as_leaf(n);
-            if (Equal{}(k, leaf->key)) {
-                if constexpr (values_comparable_v) {
-                    if (v == leaf->value)
+            if (Equal{}(k, Traits::key_of(leaf->entry))) {
+                if constexpr (Traits::updates_value) {
+                    if constexpr (Traits::value_comparable) {
+                        if (Traits::same_value(leaf->entry.second, e.second))
+                            return n;
+                    }
+                    changed = true;
+                    if (leaf->gen == gen) {
+                        Traits::assign_value(leaf->entry, std::move(e).second);
                         return n;
-                }
-                changed = true;
-                if (leaf->gen == gen) {
-                    leaf->value = std::move(v);
+                    }
+                    return std::make_shared<leaf_node>(gen, leaf->hash,
+                                                       Traits::replace_value(leaf->entry, std::move(e).second));
+                } else {
                     return n;
                 }
-                return std::make_shared<leaf_node>(gen, leaf->hash, leaf->key, std::move(v));
             }
             if (h == leaf->hash) {
                 added = true;
                 changed = true;
-                std::vector<entry_pair> es;
+                std::vector<entry_type> es;
                 es.reserve(2);
-                es.emplace_back(leaf->key, leaf->value);
-                es.emplace_back(std::move(k), std::move(v));
+                es.push_back(leaf->entry);
+                es.push_back(std::move(e));
                 return std::make_shared<collision_node>(gen, h, std::move(es));
             }
             assert(depth < detail::k_levels);
             std::uint32_t bit = detail::bit_for(leaf->hash, depth);
             auto b = std::make_shared<bitmap_node>(gen, depth, bit, std::vector<node_ptr>{std::move(n)});
-            return ins(std::move(b), h, depth, std::move(k), std::move(v), gen, added, changed);
+            return ins(std::move(b), h, depth, std::move(e), gen, added, changed);
         }
         case node::kind_t::collision: {
             collision_node* col = as_collision(n);
             const auto it = std::find_if(col->entries.begin(), col->entries.end(),
-                                         [&](const entry_pair& e) { return Equal{}(k, e.first); });
+                                         [&](const entry_type& x) { return Equal{}(k, Traits::key_of(x)); });
             if (it != col->entries.end()) {
-                if constexpr (values_comparable_v) {
-                    if (it->second == v)
+                if constexpr (Traits::updates_value) {
+                    if constexpr (Traits::value_comparable) {
+                        if (Traits::same_value(it->second, e.second))
+                            return n;
+                    }
+                    changed = true;
+                    if (col->gen == gen) {
+                        Traits::assign_value(*it, std::move(e).second);
                         return n;
-                }
-                changed = true;
-                if (col->gen == gen) {
-                    it->second = std::move(v);
+                    }
+                    auto clone = std::make_shared<collision_node>(gen, col->hash, col->entries);
+                    Traits::assign_value(clone->entries[static_cast<std::size_t>(it - col->entries.begin())],
+                                         std::move(e).second);
+                    return clone;
+                } else {
                     return n;
                 }
-                auto clone = std::make_shared<collision_node>(gen, col->hash, col->entries);
-                clone->entries[static_cast<std::size_t>(it - col->entries.begin())].second = std::move(v);
-                return clone;
             }
             if (h == col->hash) {
                 added = true;
                 changed = true;
                 if (col->gen == gen) {
-                    col->entries.emplace_back(std::move(k), std::move(v));
+                    col->entries.push_back(std::move(e));
                     return n;
                 }
                 auto clone = std::make_shared<collision_node>(gen, col->hash, col->entries);
-                clone->entries.emplace_back(std::move(k), std::move(v));
+                clone->entries.push_back(std::move(e));
                 return clone;
             }
             assert(depth < detail::k_levels);
             std::uint32_t bit = detail::bit_for(col->hash, depth);
             auto b = std::make_shared<bitmap_node>(gen, depth, bit, std::vector<node_ptr>{std::move(n)});
-            return ins(std::move(b), h, depth, std::move(k), std::move(v), gen, added, changed);
+            return ins(std::move(b), h, depth, std::move(e), gen, added, changed);
         }
         case node::kind_t::bitmap: {
             bitmap_node* bm = as_bitmap(n);
@@ -223,7 +275,7 @@ private:
             if ((bm->bitmap & bit) == 0) {
                 added = true;
                 changed = true;
-                node_ptr new_leaf = std::make_shared<leaf_node>(gen, h, std::move(k), std::move(v));
+                node_ptr new_leaf = std::make_shared<leaf_node>(gen, h, std::move(e));
                 if (bm->gen == gen) {
                     bm->children.insert(bm->children.begin() + static_cast<difference_type>(pos),
                                         std::move(new_leaf));
@@ -237,7 +289,7 @@ private:
                 return clone;
             }
             node_ptr new_child = ins(bm->children[pos], h, depth + 1,
-                                     std::move(k), std::move(v), gen, added, changed);
+                                     std::move(e), gen, added, changed);
             if (new_child == bm->children[pos])
                 return n;
             if (bm->gen == gen) {
@@ -258,7 +310,7 @@ private:
         switch (n->kind) {
         case node::kind_t::leaf: {
             const leaf_node* leaf = as_leaf(n);
-            if (!Equal{}(k, leaf->key))
+            if (!Equal{}(k, Traits::key_of(leaf->entry)))
                 return n;
             erased = true;
             return nullptr;
@@ -266,7 +318,7 @@ private:
         case node::kind_t::collision: {
             collision_node* col = as_collision(n);
             const auto it = std::find_if(col->entries.begin(), col->entries.end(),
-                                         [&](const entry_pair& e) { return Equal{}(k, e.first); });
+                                         [&](const entry_type& x) { return Equal{}(k, Traits::key_of(x)); });
             if (it == col->entries.end())
                 return n;
             erased = true;
@@ -274,8 +326,7 @@ private:
                 return nullptr;
             if (col->entries.size() == 2) {
                 const std::size_t keep = it == col->entries.begin() ? 1 : 0;
-                const entry_pair& e = col->entries[keep];
-                return std::make_shared<leaf_node>(gen, col->hash, e.first, e.second);
+                return std::make_shared<leaf_node>(gen, col->hash, col->entries[keep]);
             }
             if (col->gen == gen) {
                 col->entries.erase(it);
@@ -328,15 +379,65 @@ private:
         return n;
     }
 
-public:    class const_iterator
+    struct find_result
+    {
+        const node* node = nullptr;
+        std::size_t entry = 0;
+    };
+
+    static find_result find_in(const node* cur, std::uint64_t h, const Key& k)
+    {
+        for (;;) {
+            switch (cur->kind) {
+            case node::kind_t::bitmap: {
+                const auto* bm = static_cast<const bitmap_node*>(cur);
+                const std::uint32_t bit = detail::bit_for(h, bm->depth);
+                if ((bm->bitmap & bit) == 0)
+                    return {};
+                const std::size_t pos =
+                    static_cast<std::size_t>(std::popcount(bm->bitmap & (bit - 1)));
+                cur = bm->children[pos].get();
+                break;
+            }
+            case node::kind_t::leaf: {
+                const auto* leaf = static_cast<const leaf_node*>(cur);
+                if (Equal{}(k, Traits::key_of(leaf->entry)))
+                    return {cur, 0};
+                return {};
+            }
+            case node::kind_t::collision: {
+                const auto* col = static_cast<const collision_node*>(cur);
+                for (std::size_t i = 0; i < col->entries.size(); ++i) {
+                    if (Equal{}(k, Traits::key_of(col->entries[i])))
+                        return {cur, i};
+                }
+                return {};
+            }
+            }
+        }
+    }
+
+    static std::pair<std::vector<frame>, node_ptr> descend(node_ptr n)
+    {
+        std::vector<frame> path;
+        while (n->kind == node::kind_t::bitmap) {
+            const bitmap_node* bm = as_bitmap(n);
+            path.push_back(frame{n, 0});
+            n = bm->children[0];
+        }
+        return {std::move(path), std::move(n)};
+    }
+
+public:
+    class const_iterator
     {
     public:
         using iterator_category = std::forward_iterator_tag;
         using iterator_concept = std::forward_iterator_tag;
-        using value_type = std::pair<const Key, Value>;
+        using value_type = exposed_type;
         using difference_type = std::ptrdiff_t;
-        using pointer = const value_type*;
-        using reference = const value_type&;
+        using pointer = const exposed_type*;
+        using reference = const exposed_type&;
 
         const_iterator() noexcept = default;
 
@@ -422,12 +523,12 @@ public:    class const_iterator
         }
 
     private:
-        friend class hamt_map;
+        friend hamt_common;
 
         std::vector<frame> path_;
         node_ptr node_;
         std::size_t entry_ = 0;
-        mutable std::optional<value_type> current_;
+        mutable std::optional<exposed_type> current_;
 
         const_iterator(std::vector<frame> path, node_ptr n, std::size_t entry)
             : path_(std::move(path)), node_(std::move(n)), entry_(entry) {}
@@ -437,12 +538,12 @@ public:    class const_iterator
             switch (node_->kind) {
             case node::kind_t::leaf: {
                 const leaf_node* leaf = as_leaf(node_);
-                current_.emplace(leaf->key, leaf->value);
+                current_.emplace(leaf->entry);
                 break;
             }
             case node::kind_t::collision: {
                 const collision_node* col = as_collision(node_);
-                current_.emplace(col->entries[entry_].first, col->entries[entry_].second);
+                current_.emplace(col->entries[entry_]);
                 break;
             }
             case node::kind_t::bitmap:
@@ -451,42 +552,7 @@ public:    class const_iterator
         }
     };
 
-    hamt_map() = default;
-
-    hamt_map(const hamt_map&) = delete;
-    hamt_map& operator=(const hamt_map&) = delete;
-
-    hamt_map(hamt_map&& other) noexcept
-        : root_(std::move(other.root_)), size_(other.size_), gen_(other.gen_)
-    {
-        other.size_ = 0;
-        other.gen_ = 0;
-    }
-
-    hamt_map& operator=(hamt_map&& other) noexcept
-    {
-        if (this != &other) {
-            root_ = std::move(other.root_);
-            size_ = other.size_;
-            gen_ = other.gen_;
-            other.size_ = 0;
-            other.gen_ = 0;
-        }
-        return *this;
-    }
-
-    hamt_map(std::initializer_list<value_type> init)
-    {
-        for (const value_type& kv : init)
-            insert(kv.first, kv.second);
-    }
-
-    template <std::input_iterator It>
-    hamt_map(It first, It last)
-    {
-        for (; first != last; ++first)
-            insert(first->first, first->second);
-    }
+    using iterator = const_iterator;
 
     [[nodiscard]] size_type size() const noexcept
     {
@@ -498,60 +564,18 @@ public:    class const_iterator
         return size_ == 0;
     }
 
-    [[nodiscard]] hamt_map fork() noexcept
+    [[nodiscard]] Derived fork() noexcept
     {
         assert(gen_ != (std::numeric_limits<std::uint64_t>::max)());
         ++gen_;
-        return hamt_map(root_, size_, gen_);
-    }
-
-    hamt_map& insert(Key k, Value v)
-    {
-        const std::uint64_t h = hash_of(k);
-        if (root_ == nullptr) {
-            root_ = std::make_shared<leaf_node>(gen_, h, std::move(k), std::move(v));
-            ++size_;
-            return *this;
-        }
-        bool added = false;
-        bool changed = false;
-        node_ptr nr = ins(root_, h, 0, std::move(k), std::move(v), gen_, added, changed);
-        if (nr != root_)
-            root_ = std::move(nr);
-        if (changed)
-            size_ += (added ? 1 : 0);
-        return *this;
-    }
-
-    hamt_map& insert(const value_type& kv)
-    {
-        return insert(kv.first, kv.second);
-    }
-
-    hamt_map& erase(const Key& k)
-    {
-        if (root_ == nullptr)
-            return *this;
-        bool erased = false;
-        node_ptr nr = del(root_, hash_of(k), 0, k, gen_, erased);
-        if (nr != root_)
-            root_ = std::move(nr);
-        if (erased)
-            --size_;
-        return *this;
+        return Derived(root_, size_, gen_);
     }
 
     [[nodiscard]] const_iterator begin() const
     {
         if (root_ == nullptr)
             return const_iterator();
-        std::vector<frame> path;
-        node_ptr n = root_;
-        while (n->kind == node::kind_t::bitmap) {
-            const bitmap_node* bm = as_bitmap(n);
-            path.push_back(frame{n, 0});
-            n = bm->children[0];
-        }
+        auto [path, n] = descend(root_);
         return const_iterator(std::move(path), std::move(n), 0);
     }
 
@@ -594,11 +618,200 @@ public:    class const_iterator
         return contains(k) ? 1 : 0;
     }
 
-    void swap(hamt_map& other) noexcept
+    void swap(Derived& other) noexcept
     {
         root_.swap(other.root_);
         std::swap(size_, other.size_);
         std::swap(gen_, other.gen_);
+    }
+
+protected:
+    hamt_common() = default;
+
+    hamt_common(node_ptr root, size_type size, std::uint64_t gen)
+        : root_(std::move(root)), size_(size), gen_(gen) {}
+
+    ~hamt_common() = default;
+
+    hamt_common(const hamt_common&) = default;
+    hamt_common& operator=(const hamt_common&) = default;
+
+    hamt_common(hamt_common&& other) noexcept
+        : root_(std::move(other.root_)), size_(other.size_), gen_(other.gen_)
+    {
+        other.reset_tracking();
+    }
+
+    hamt_common& operator=(hamt_common&& other) noexcept
+    {
+        assign_from(other);
+        return *this;
+    }
+
+    void assign_from(hamt_common& other) noexcept
+    {
+        if (this != &other) {
+            root_ = std::move(other.root_);
+            size_ = other.size_;
+            gen_ = other.gen_;
+            other.reset_tracking();
+        }
+    }
+
+    Derived& insert_entry(entry_type e)
+    {
+        const std::uint64_t h = hash_of(Traits::key_of(e));
+        if (root_ == nullptr) {
+            root_ = std::make_shared<leaf_node>(gen_, h, std::move(e));
+            ++size_;
+            return self();
+        }
+        bool added = false;
+        bool changed = false;
+        node_ptr nr = ins(root_, h, 0, std::move(e), gen_, added, changed);
+        if (nr != root_)
+            root_ = std::move(nr);
+        if (changed)
+            size_ += (added ? 1 : 0);
+        return self();
+    }
+
+    Derived& erase_entry(const Key& k)
+    {
+        if (root_ == nullptr)
+            return self();
+        bool erased = false;
+        node_ptr nr = del(root_, hash_of(k), 0, k, gen_, erased);
+        if (nr != root_)
+            root_ = std::move(nr);
+        if (erased)
+            --size_;
+        return self();
+    }
+
+    void reset_tracking() noexcept
+    {
+        size_ = 0;
+        gen_ = 0;
+    }
+
+    static bool entries_equal(const const_iterator& a, const const_iterator& b)
+    {
+        if (!Equal{}(Traits::key_of(*a), Traits::key_of(*b)))
+            return false;
+        if constexpr (Traits::value_comparable)
+            return Traits::same_value(a->second, b->second);
+        else
+            return true;
+    }
+
+    static bool containers_equal(const Derived& a, const Derived& b)
+    {
+        if (a.size_ != b.size_)
+            return false;
+        auto ia = a.begin();
+        auto ib = b.begin();
+        const auto ae = a.end();
+        for (; ia != ae; ++ia, ++ib) {
+            if (!entries_equal(ia, ib))
+                return false;
+        }
+        return true;
+    }
+
+private:
+    Derived& self() noexcept
+    {
+        return static_cast<Derived&>(*this);
+    }
+
+    node_ptr root_;
+    size_type size_ = 0;
+    std::uint64_t gen_ = 0;
+};
+
+} // namespace detail
+
+template <typename Key,
+          typename Value,
+          typename Hash = std::hash<Key>,
+          typename Equal = std::equal_to<Key>>
+requires std::copy_constructible<Key> && std::copy_constructible<Value>
+    && std::predicate<Equal, const Key&, const Key&>
+    && std::invocable<Hash, const Key&>
+    && std::convertible_to<std::invoke_result_t<Hash, const Key&>, std::uint64_t>
+    && std::is_empty_v<Hash> && std::is_empty_v<Equal>
+class hamt_map
+    : public detail::hamt_common<Key, Hash, Equal, detail::map_traits<Key, Value>,
+                                 hamt_map<Key, Value, Hash, Equal>>
+{
+    using base = detail::hamt_common<Key, Hash, Equal, detail::map_traits<Key, Value>,
+                                     hamt_map<Key, Value, Hash, Equal>>;
+    friend base;
+
+public:
+    using key_type = Key;
+    using mapped_type = Value;
+    using value_type = std::pair<const Key, Value>;
+    using size_type = std::size_t;
+    using difference_type = std::ptrdiff_t;
+    using hash_type = Hash;
+    using equal_type = Equal;
+    using const_iterator = typename base::const_iterator;
+    using iterator = const_iterator;
+
+    hamt_map() = default;
+
+    hamt_map(const hamt_map&) = delete;
+    hamt_map& operator=(const hamt_map&) = delete;
+
+    hamt_map(hamt_map&& other) noexcept
+        : base(static_cast<base&&>(other))
+    {
+    }
+
+    hamt_map& operator=(hamt_map&& other) noexcept
+    {
+        base::assign_from(other);
+        return *this;
+    }
+
+    hamt_map(std::initializer_list<value_type> init)
+    {
+        for (const value_type& kv : init)
+            insert(kv.first, kv.second);
+    }
+
+    template <std::input_iterator It>
+    hamt_map(It first, It last)
+    {
+        for (; first != last; ++first)
+            insert(first->first, first->second);
+    }
+
+    [[nodiscard]] hamt_map fork() noexcept
+    {
+        return base::fork();
+    }
+
+    hamt_map& insert(Key k, Value v)
+    {
+        return base::insert_entry(std::make_pair(std::move(k), std::move(v)));
+    }
+
+    hamt_map& insert(const value_type& kv)
+    {
+        return insert(kv.first, kv.second);
+    }
+
+    hamt_map& erase(const Key& k)
+    {
+        return base::erase_entry(k);
+    }
+
+    void swap(hamt_map& other) noexcept
+    {
+        base::swap(other);
     }
 
     friend void swap(hamt_map& a, hamt_map& b) noexcept
@@ -609,16 +822,7 @@ public:    class const_iterator
     friend bool operator==(const hamt_map& a, const hamt_map& b)
         requires std::equality_comparable<Value>
     {
-        if (a.size_ != b.size_)
-            return false;
-        auto ia = a.begin();
-        auto ib = b.begin();
-        const auto ae = a.end();
-        for (; ia != ae; ++ia, ++ib) {
-            if (!Equal{}(ia->first, ib->first) || !(ia->second == ib->second))
-                return false;
-        }
-        return true;
+        return base::containers_equal(a, b);
     }
 
     friend bool operator!=(const hamt_map& a, const hamt_map& b)
@@ -628,50 +832,101 @@ public:    class const_iterator
     }
 
 private:
-    struct find_result
-    {
-        const node* node = nullptr;
-        std::size_t entry = 0;
-    };
+    using base::base;
+};
 
-    static find_result find_in(const node* cur, std::uint64_t h, const Key& k)
+template <typename Key,
+          typename Hash = std::hash<Key>,
+          typename Equal = std::equal_to<Key>>
+requires std::copy_constructible<Key>
+    && std::predicate<Equal, const Key&, const Key&>
+    && std::invocable<Hash, const Key&>
+    && std::convertible_to<std::invoke_result_t<Hash, const Key&>, std::uint64_t>
+    && std::is_empty_v<Hash> && std::is_empty_v<Equal>
+class hamt_set
+    : public detail::hamt_common<Key, Hash, Equal, detail::set_traits<Key>,
+                                 hamt_set<Key, Hash, Equal>>
+{
+    using base = detail::hamt_common<Key, Hash, Equal, detail::set_traits<Key>,
+                                     hamt_set<Key, Hash, Equal>>;
+    friend base;
+
+public:
+    using key_type = Key;
+    using value_type = Key;
+    using size_type = std::size_t;
+    using difference_type = std::ptrdiff_t;
+    using hash_type = Hash;
+    using equal_type = Equal;
+    using const_iterator = typename base::const_iterator;
+    using iterator = const_iterator;
+
+    hamt_set() = default;
+
+    hamt_set(const hamt_set&) = delete;
+    hamt_set& operator=(const hamt_set&) = delete;
+
+    hamt_set(hamt_set&& other) noexcept
+        : base(static_cast<base&&>(other))
     {
-        for (;;) {
-            switch (cur->kind) {
-            case node::kind_t::bitmap: {
-                const auto* bm = static_cast<const bitmap_node*>(cur);
-                const std::uint32_t bit = detail::bit_for(h, bm->depth);
-                if ((bm->bitmap & bit) == 0)
-                    return {};
-                const std::size_t pos =
-                    static_cast<std::size_t>(std::popcount(bm->bitmap & (bit - 1)));
-                cur = bm->children[pos].get();
-                break;
-            }
-            case node::kind_t::leaf: {
-                const auto* leaf = static_cast<const leaf_node*>(cur);
-                if (Equal{}(k, leaf->key))
-                    return {cur, 0};
-                return {};
-            }
-            case node::kind_t::collision: {
-                const auto* col = static_cast<const collision_node*>(cur);
-                for (std::size_t i = 0; i < col->entries.size(); ++i) {
-                    if (Equal{}(k, col->entries[i].first))
-                        return {cur, i};
-                }
-                return {};
-            }
-            }
-        }
     }
 
-    node_ptr root_;
-    size_type size_ = 0;
-    std::uint64_t gen_ = 0;
+    hamt_set& operator=(hamt_set&& other) noexcept
+    {
+        base::assign_from(other);
+        return *this;
+    }
 
-    hamt_map(node_ptr root, size_type size, std::uint64_t gen)
-        : root_(std::move(root)), size_(size), gen_(gen) {}
+    hamt_set(std::initializer_list<value_type> init)
+    {
+        for (const value_type& k : init)
+            insert(k);
+    }
+
+    template <std::input_iterator It>
+    hamt_set(It first, It last)
+    {
+        for (; first != last; ++first)
+            insert(*first);
+    }
+
+    [[nodiscard]] hamt_set fork() noexcept
+    {
+        return base::fork();
+    }
+
+    hamt_set& insert(Key k)
+    {
+        return base::insert_entry(std::move(k));
+    }
+
+    hamt_set& erase(const Key& k)
+    {
+        return base::erase_entry(k);
+    }
+
+    void swap(hamt_set& other) noexcept
+    {
+        base::swap(other);
+    }
+
+    friend void swap(hamt_set& a, hamt_set& b) noexcept
+    {
+        a.swap(b);
+    }
+
+    friend bool operator==(const hamt_set& a, const hamt_set& b)
+    {
+        return base::containers_equal(a, b);
+    }
+
+    friend bool operator!=(const hamt_set& a, const hamt_set& b)
+    {
+        return !(a == b);
+    }
+
+private:
+    using base::base;
 };
 
 } // namespace hamt
