@@ -412,6 +412,75 @@ static void test_constructors()
     CHECK(m2.find(10)->second == 5);
 }
 
+static void test_clear()
+{
+    map_t m;
+    for (std::uint64_t i = 0; i < 500; ++i)
+        m.insert(i, i * i);
+    map_t snap = m.fork();
+    m.clear();
+    CHECK(m.empty());
+    CHECK(m.size() == 0);
+    CHECK(m.begin() == m.end());
+    CHECK(!m.contains(0));
+    CHECK(m.find(1) == m.end());
+    CHECK(snap.size() == 500);
+    CHECK(snap.contains(250));
+    CHECK(snap.find(499)->second == 499 * 499);
+    m.insert(1000, 1000).insert(1001, 1001);
+    CHECK(m.size() == 2);
+    CHECK(m.contains(1000));
+    CHECK(!m.contains(1));
+    CHECK(snap.size() == 500);
+    CHECK(!snap.contains(1000));
+    CHECK(snap.find(7)->second == 49);
+    m.clear();
+    CHECK(m.empty());
+    snap.clear();
+    CHECK(snap.empty());
+    snap.insert(9, 9);
+    CHECK(snap.size() == 1);
+    CHECK(snap.contains(9));
+    struct zero_hash
+    {
+        std::uint64_t operator()(std::uint64_t) const noexcept { return 0; }
+    };
+    hamt::hamt_map<std::uint64_t, std::uint64_t, zero_hash> c;
+    for (std::uint64_t i = 0; i < 100; ++i)
+        c.insert(i, i);
+    c.clear();
+    CHECK(c.empty());
+    c.insert(5, 5);
+    CHECK(c.size() == 1);
+    CHECK(c.contains(5));
+}
+
+static void test_set_clear()
+{
+    set_t s;
+    for (std::uint64_t i = 0; i < 500; ++i)
+        s.insert(i);
+    set_t snap = s.fork();
+    s.clear();
+    CHECK(s.empty());
+    CHECK(s.size() == 0);
+    CHECK(s.begin() == s.end());
+    CHECK(!s.contains(0));
+    CHECK(snap.size() == 500);
+    CHECK(snap.contains(250));
+    s.insert(1000).insert(1001);
+    CHECK(s.size() == 2);
+    CHECK(s.contains(1000));
+    CHECK(!s.contains(1));
+    CHECK(snap.size() == 500);
+    CHECK(!snap.contains(1000));
+    s.clear();
+    CHECK(s.empty());
+    s.insert(9);
+    CHECK(s.size() == 1);
+    CHECK(s.contains(9));
+}
+
 static void test_swap()
 {
     map_t a;
@@ -993,6 +1062,7 @@ int main()
     test_custom_equal();
     test_non_comparable_value();
     test_constructors();
+    test_clear();
     test_swap();
     test_equality();
     test_iterator_snapshot_stability();
@@ -1008,6 +1078,7 @@ int main()
     test_set_collision_bucket();
     test_set_iteration_order();
     test_set_constructors();
+    test_set_clear();
     test_set_swap();
     test_set_equality();
     test_set_move();

@@ -618,6 +618,12 @@ public:
         return contains(k) ? 1 : 0;
     }
 
+    void clear() noexcept
+    {
+        root_.reset();
+        size_ = 0;
+    }
+
     void swap(Derived& other) noexcept
     {
         root_.swap(other.root_);

@@ -42,6 +42,7 @@ m.contains("gamma");        // true
 | --- | --- |
 | `insert(Key, Value)` | Inserts or replaces the key, mutating the map in place. Returns `*this` for chaining. No-op if the content is unchanged. |
 | `erase(Key)` | Removes the key, mutating the map in place. Returns `*this`. No-op if the key is absent. |
+| `clear()` | Removes all entries. O(1); forked maps keep their contents. |
 | `fork()` | Returns a new map sharing the current structure and advances both maps to a fresh generation. O(1). |
 | `find(Key)` | Iterator to the entry, or `end()` |
 | `contains(Key)`, `count(Key)` | Membership tests |
@@ -68,6 +69,7 @@ a strict predicate on `const Key&`. Both `Hash` and `Equal` must be stateless
 | --- | --- |
 | `insert(Key)` | Inserts the key, mutating the set in place. Returns `*this` for chaining. No-op if the key is already present. |
 | `erase(Key)` | Removes the key, mutating the set in place. Returns `*this`. No-op if the key is absent. |
+| `clear()` | Removes all entries. O(1); forked sets keep their contents. |
 | `fork()` | Returns a new set sharing the current structure and advances both sets to a fresh generation. O(1). |
 | `find(Key)` | Iterator to the key, or `end()` |
 | `contains(Key)`, `count(Key)` | Membership tests |
