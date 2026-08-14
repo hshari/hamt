@@ -9,9 +9,9 @@
 #include <functional>
 #include <initializer_list>
 #include <iterator>
-#include <list>
 #include <limits>
 #include <memory>
+#include <new>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -53,8 +53,9 @@ constexpr std::uint32_t bit_for(std::uint64_t hash, std::size_t depth) noexcept
 template <typename Key, typename Value>
 struct map_traits
 {
-    using entry = std::pair<const Key, Value>;
+    using entry = std::pair<Key, Value>;
     using exposed = std::pair<const Key, Value>;
+    using mapped_type = Value;
 
     static constexpr bool updates_value = true;
 
@@ -65,6 +66,16 @@ struct map_traits
     static const Key& key_of(const entry& e) noexcept
     {
         return e.first;
+    }
+
+    static const Key& key_of(const exposed& e) noexcept
+    {
+        return e.first;
+    }
+
+    static const exposed& to_exposed(const entry& e) noexcept
+    {
+        return *std::launder(reinterpret_cast<const exposed*>(std::addressof(e)));
     }
 
     static bool same_value(const Value& a, const Value& b)
@@ -90,12 +101,18 @@ struct set_traits
 {
     using entry = Key;
     using exposed = Key;
+    using mapped_type = void;
 
     static constexpr bool updates_value = false;
 
     static constexpr bool value_comparable = false;
 
     static const Key& key_of(const entry& e) noexcept
+    {
+        return e;
+    }
+
+    static const exposed& to_exposed(const entry& e) noexcept
     {
         return e;
     }
@@ -115,18 +132,18 @@ public:
 protected:
     using entry_type = typename Traits::entry;
     using exposed_type = typename Traits::exposed;
-    struct node;
-    using node_ptr = std::shared_ptr<node>;
+
+    class node_ptr;
 
     struct node
     {
         enum class kind_t : std::uint8_t { leaf, collision, bitmap };
         const kind_t kind;
         const std::uint64_t gen;
-        node(kind_t k, std::uint64_t g) noexcept : kind(k), gen(g) {}
+        std::uint32_t refs;
+        node(kind_t k, std::uint64_t g) noexcept : kind(k), gen(g), refs(1) {}
         node(const node&) = delete;
         node& operator=(const node&) = delete;
-        virtual ~node() = default;
     };
 
     struct leaf_node final : node
@@ -140,18 +157,136 @@ protected:
     struct collision_node final : node
     {
         const std::uint64_t hash;
-        std::list<entry_type> entries;
-        collision_node(std::uint64_t g, std::uint64_t h, std::list<entry_type> es)
+        std::vector<entry_type> entries;
+        collision_node(std::uint64_t g, std::uint64_t h, std::vector<entry_type> es)
             : node(node::kind_t::collision, g), hash(h), entries(std::move(es)) {}
     };
 
     struct bitmap_node final : node
     {
-        const std::size_t depth;
         std::uint32_t bitmap;
-        std::vector<node_ptr> children;
-        bitmap_node(std::uint64_t g, std::size_t d, std::uint32_t b, std::vector<node_ptr> ch)
-            : node(node::kind_t::bitmap, g), depth(d), bitmap(b), children(std::move(ch)) {}
+        bitmap_node(std::uint64_t g, std::uint32_t b)
+            : node(node::kind_t::bitmap, g), bitmap(b) {}
+
+        node_ptr* children() noexcept
+        {
+            return reinterpret_cast<node_ptr*>(this + 1);
+        }
+
+        const node_ptr* children() const noexcept
+        {
+            return reinterpret_cast<const node_ptr*>(this + 1);
+        }
+
+        std::size_t count() const noexcept
+        {
+            return static_cast<std::size_t>(std::popcount(bitmap));
+        }
+    };
+
+    class node_ptr
+    {
+    public:
+        node_ptr() noexcept = default;
+        node_ptr(std::nullptr_t) noexcept {}
+        explicit node_ptr(node* p) noexcept : p_(p) {}
+
+        node_ptr(const node_ptr& other) noexcept : p_(other.p_)
+        {
+            if (p_ != nullptr)
+                ++p_->refs;
+        }
+
+        node_ptr(node_ptr&& other) noexcept : p_(other.p_)
+        {
+            other.p_ = nullptr;
+        }
+
+        node_ptr& operator=(const node_ptr& other) noexcept
+        {
+            if (this != &other) {
+                release();
+                p_ = other.p_;
+                if (p_ != nullptr)
+                    ++p_->refs;
+            }
+            return *this;
+        }
+
+        node_ptr& operator=(node_ptr&& other) noexcept
+        {
+            if (this != &other) {
+                release();
+                p_ = other.p_;
+                other.p_ = nullptr;
+            }
+            return *this;
+        }
+
+        ~node_ptr()
+        {
+            release();
+        }
+
+        node* get() const noexcept { return p_; }
+        node& operator*() const noexcept { return *p_; }
+        node* operator->() const noexcept { return p_; }
+        explicit operator bool() const noexcept { return p_ != nullptr; }
+
+        void reset(node* p = nullptr) noexcept
+        {
+            if (p_ != p) {
+                release();
+                p_ = p;
+            }
+        }
+
+        friend bool operator==(const node_ptr& a, const node_ptr& b) noexcept
+        {
+            return a.p_ == b.p_;
+        }
+
+        friend bool operator!=(const node_ptr& a, const node_ptr& b) noexcept
+        {
+            return a.p_ != b.p_;
+        }
+
+    private:
+        static void destroy(node* n) noexcept
+        {
+            switch (n->kind) {
+            case node::kind_t::leaf: {
+                leaf_node* l = static_cast<leaf_node*>(n);
+                l->~leaf_node();
+                ::operator delete(l);
+                break;
+            }
+            case node::kind_t::collision: {
+                collision_node* c = static_cast<collision_node*>(n);
+                c->~collision_node();
+                ::operator delete(c);
+                break;
+            }
+            case node::kind_t::bitmap: {
+                bitmap_node* b = static_cast<bitmap_node*>(n);
+                node_ptr* ch = b->children();
+                const std::size_t count = b->count();
+                for (std::size_t i = 0; i < count; ++i)
+                    ch[i].~node_ptr();
+                b->~bitmap_node();
+                ::operator delete(b);
+                break;
+            }
+            }
+        }
+
+        void release() noexcept
+        {
+            if (p_ != nullptr && --p_->refs == 0)
+                destroy(p_);
+        }
+
+        node* p_ = nullptr;
     };
 
     static leaf_node* as_leaf(const node_ptr& n) noexcept
@@ -169,20 +304,99 @@ protected:
         return static_cast<bitmap_node*>(n.get());
     }
 
+    static const leaf_node* as_leaf(const node* n) noexcept
+    {
+        return static_cast<const leaf_node*>(n);
+    }
+
+    static const collision_node* as_collision(const node* n) noexcept
+    {
+        return static_cast<const collision_node*>(n);
+    }
+
+    static const bitmap_node* as_bitmap(const node* n) noexcept
+    {
+        return static_cast<const bitmap_node*>(n);
+    }
+
     static std::uint64_t hash_of(const Key& k)
     {
         return detail::mix64(static_cast<std::uint64_t>(Hash{}(k)));
     }
 
-    struct frame
+    static node_ptr make_leaf(std::uint64_t gen, std::uint64_t h, entry_type e)
     {
-        node_ptr parent;
-        std::size_t index;
-        bool operator==(const frame& other) const noexcept
-        {
-            return parent == other.parent && index == other.index;
-        }
-    };
+        return node_ptr(new leaf_node(gen, h, std::move(e)));
+    }
+
+    static node_ptr make_collision(std::uint64_t gen, std::uint64_t h, std::vector<entry_type> es)
+    {
+        return node_ptr(new collision_node(gen, h, std::move(es)));
+    }
+
+    static node_ptr make_bitmap_single(std::uint64_t gen, std::uint32_t bitmap, node_ptr child)
+    {
+        void* mem = ::operator new(sizeof(bitmap_node) + sizeof(node_ptr));
+        bitmap_node* bm = ::new (mem) bitmap_node(gen, bitmap);
+        ::new (bm->children()) node_ptr(std::move(child));
+        return node_ptr(bm);
+    }
+
+    static node_ptr make_bitmap_insert(std::uint64_t gen, const bitmap_node* bm,
+                                       std::size_t pos, std::uint32_t bit, node_ptr new_child)
+    {
+        const std::size_t count = bm->count();
+        void* mem = ::operator new(sizeof(bitmap_node) + (count + 1) * sizeof(node_ptr));
+        bitmap_node* out = ::new (mem) bitmap_node(gen, bm->bitmap | bit);
+        node_ptr* dst = out->children();
+        const node_ptr* src = bm->children();
+        for (std::size_t i = 0; i < pos; ++i)
+            ::new (dst + i) node_ptr(src[i]);
+        ::new (dst + pos) node_ptr(std::move(new_child));
+        for (std::size_t i = pos; i < count; ++i)
+            ::new (dst + i + 1) node_ptr(src[i]);
+        return node_ptr(out);
+    }
+
+    static node_ptr make_bitmap_replace(std::uint64_t gen, const bitmap_node* bm,
+                                        std::size_t pos, node_ptr new_child)
+    {
+        const std::size_t count = bm->count();
+        void* mem = ::operator new(sizeof(bitmap_node) + count * sizeof(node_ptr));
+        bitmap_node* out = ::new (mem) bitmap_node(gen, bm->bitmap);
+        node_ptr* dst = out->children();
+        const node_ptr* src = bm->children();
+        for (std::size_t i = 0; i < pos; ++i)
+            ::new (dst + i) node_ptr(src[i]);
+        ::new (dst + pos) node_ptr(std::move(new_child));
+        for (std::size_t i = pos + 1; i < count; ++i)
+            ::new (dst + i) node_ptr(src[i]);
+        return node_ptr(out);
+    }
+
+    static node_ptr make_bitmap_erase(std::uint64_t gen, const bitmap_node* bm,
+                                      std::size_t pos, std::uint32_t bit)
+    {
+        const std::size_t count = bm->count();
+        void* mem = ::operator new(sizeof(bitmap_node) + (count - 1) * sizeof(node_ptr));
+        bitmap_node* out = ::new (mem) bitmap_node(gen, bm->bitmap & ~bit);
+        node_ptr* dst = out->children();
+        const node_ptr* src = bm->children();
+        for (std::size_t i = 0; i < pos; ++i)
+            ::new (dst + i) node_ptr(src[i]);
+        for (std::size_t i = pos + 1; i < count; ++i)
+            ::new (dst + i - 1) node_ptr(src[i]);
+        return node_ptr(out);
+    }
+
+    static void bitmap_erase_in_place(bitmap_node* bm, std::size_t pos) noexcept
+    {
+        const std::size_t count = bm->count();
+        node_ptr* ch = bm->children();
+        for (std::size_t i = pos; i + 1 < count; ++i)
+            ch[i] = std::move(ch[i + 1]);
+        ch[count - 1].~node_ptr();
+    }
 
     static node_ptr ins(node_ptr n, std::uint64_t h, std::size_t depth,
                         entry_type e, std::uint64_t gen, bool& added, bool& changed)
@@ -202,8 +416,8 @@ protected:
                         Traits::assign_value(leaf->entry, std::move(e).second);
                         return n;
                     }
-                    return std::make_shared<leaf_node>(gen, leaf->hash,
-                                                       Traits::replace_value(leaf->entry, std::move(e).second));
+                    return make_leaf(gen, leaf->hash,
+                                     Traits::replace_value(leaf->entry, std::move(e).second));
                 } else {
                     return n;
                 }
@@ -211,14 +425,15 @@ protected:
             if (h == leaf->hash) {
                 added = true;
                 changed = true;
-                std::list<entry_type> es;
-                es.push_back(leaf->entry);
+                std::vector<entry_type> es;
+                es.reserve(2);
+                es.push_back(std::move(leaf->entry));
                 es.push_back(std::move(e));
-                return std::make_shared<collision_node>(gen, h, std::move(es));
+                return make_collision(gen, h, std::move(es));
             }
             assert(depth < detail::k_levels);
             std::uint32_t bit = detail::bit_for(leaf->hash, depth);
-            auto b = std::make_shared<bitmap_node>(gen, depth, bit, std::vector<node_ptr>{std::move(n)});
+            node_ptr b = make_bitmap_single(gen, bit, std::move(n));
             return ins(std::move(b), h, depth, std::move(e), gen, added, changed);
         }
         case node::kind_t::collision: {
@@ -236,10 +451,10 @@ protected:
                         Traits::assign_value(*it, std::move(e).second);
                         return n;
                     }
-                    auto clone = std::make_shared<collision_node>(gen, col->hash, col->entries);
-                    Traits::assign_value(*std::next(clone->entries.begin(),
-                                                    std::distance(col->entries.begin(), it)),
-                                         std::move(e).second);
+                    const std::size_t idx =
+                        static_cast<std::size_t>(std::distance(col->entries.begin(), it));
+                    auto clone = make_collision(gen, col->hash, col->entries);
+                    Traits::assign_value(as_collision(clone)->entries[idx], std::move(e).second);
                     return clone;
                 } else {
                     return n;
@@ -252,48 +467,35 @@ protected:
                     col->entries.push_back(std::move(e));
                     return n;
                 }
-                auto clone = std::make_shared<collision_node>(gen, col->hash, col->entries);
-                clone->entries.push_back(std::move(e));
+                auto clone = make_collision(gen, col->hash, col->entries);
+                as_collision(clone)->entries.push_back(std::move(e));
                 return clone;
             }
             assert(depth < detail::k_levels);
             std::uint32_t bit = detail::bit_for(col->hash, depth);
-            auto b = std::make_shared<bitmap_node>(gen, depth, bit, std::vector<node_ptr>{std::move(n)});
+            node_ptr b = make_bitmap_single(gen, bit, std::move(n));
             return ins(std::move(b), h, depth, std::move(e), gen, added, changed);
         }
         case node::kind_t::bitmap: {
             bitmap_node* bm = as_bitmap(n);
-            assert(bm->depth == depth);
             const std::uint32_t bit = detail::bit_for(h, depth);
             const std::size_t pos =
                 static_cast<std::size_t>(std::popcount(bm->bitmap & (bit - 1)));
             if ((bm->bitmap & bit) == 0) {
                 added = true;
                 changed = true;
-                node_ptr new_leaf = std::make_shared<leaf_node>(gen, h, std::move(e));
-                if (bm->gen == gen) {
-                    bm->children.insert(bm->children.begin() + static_cast<difference_type>(pos),
-                                        std::move(new_leaf));
-                    bm->bitmap |= bit;
-                    return n;
-                }
-                auto clone = std::make_shared<bitmap_node>(gen, bm->depth, bm->bitmap, bm->children);
-                clone->children.insert(clone->children.begin() + static_cast<difference_type>(pos),
-                                       std::move(new_leaf));
-                clone->bitmap |= bit;
-                return clone;
+                node_ptr new_leaf = make_leaf(gen, h, std::move(e));
+                return make_bitmap_insert(gen, bm, pos, bit, std::move(new_leaf));
             }
-            node_ptr new_child = ins(bm->children[pos], h, depth + 1,
+            node_ptr new_child = ins(bm->children()[pos], h, depth + 1,
                                      std::move(e), gen, added, changed);
-            if (new_child == bm->children[pos])
+            if (new_child == bm->children()[pos])
                 return n;
             if (bm->gen == gen) {
-                bm->children[pos] = std::move(new_child);
+                bm->children()[pos] = std::move(new_child);
                 return n;
             }
-            auto clone = std::make_shared<bitmap_node>(gen, bm->depth, bm->bitmap, bm->children);
-            clone->children[pos] = std::move(new_child);
-            return clone;
+            return make_bitmap_replace(gen, bm, pos, std::move(new_child));
         }
         }
         return n;
@@ -321,111 +523,108 @@ protected:
                 return nullptr;
             if (col->entries.size() == 2) {
                 const std::size_t keep = it == col->entries.begin() ? 1 : 0;
-                return std::make_shared<leaf_node>(gen, col->hash,
-                                                   *std::next(col->entries.begin(),
-                                                              static_cast<std::ptrdiff_t>(keep)));
+                return make_leaf(gen, col->hash, col->entries[keep]);
             }
             if (col->gen == gen) {
                 col->entries.erase(it);
                 return n;
             }
-            auto clone = std::make_shared<collision_node>(gen, col->hash, col->entries);
-            clone->entries.erase(std::next(clone->entries.begin(),
-                                           std::distance(col->entries.begin(), it)));
+            const std::size_t idx =
+                static_cast<std::size_t>(std::distance(col->entries.begin(), it));
+            auto clone = make_collision(gen, col->hash, col->entries);
+            as_collision(clone)->entries.erase(
+                as_collision(clone)->entries.begin() + static_cast<std::ptrdiff_t>(idx));
             return clone;
         }
         case node::kind_t::bitmap: {
             bitmap_node* bm = as_bitmap(n);
-            assert(bm->depth == depth);
             const std::uint32_t bit = detail::bit_for(h, depth);
             if ((bm->bitmap & bit) == 0)
                 return n;
             const std::size_t pos =
                 static_cast<std::size_t>(std::popcount(bm->bitmap & (bit - 1)));
-            node_ptr new_child = del(bm->children[pos], h, depth + 1, k, gen, erased);
+            node_ptr new_child = del(bm->children()[pos], h, depth + 1, k, gen, erased);
             if (!erased)
                 return n;
-            if (new_child == bm->children[pos])
+            if (new_child == bm->children()[pos])
                 return n;
             if (new_child) {
                 if (bm->gen == gen) {
-                    bm->children[pos] = std::move(new_child);
+                    bm->children()[pos] = std::move(new_child);
                     return n;
                 }
-                auto clone = std::make_shared<bitmap_node>(gen, bm->depth, bm->bitmap, bm->children);
-                clone->children[pos] = std::move(new_child);
-                return clone;
+                return make_bitmap_replace(gen, bm, pos, std::move(new_child));
             }
-            if (bm->children.size() == 1)
+            const std::size_t count = bm->count();
+            if (count == 1)
                 return nullptr;
-            if (bm->children.size() == 2) {
+            if (count == 2) {
                 const std::size_t keep = pos == 0 ? 1 : 0;
-                if (bm->children[keep]->kind != node::kind_t::bitmap)
-                    return bm->children[keep];
+                if (bm->children()[keep]->kind != node::kind_t::bitmap)
+                    return bm->children()[keep];
             }
             if (bm->gen == gen) {
-                bm->children.erase(bm->children.begin() + static_cast<difference_type>(pos));
+                bitmap_erase_in_place(bm, pos);
                 bm->bitmap &= ~bit;
                 return n;
             }
-            auto clone = std::make_shared<bitmap_node>(gen, bm->depth, bm->bitmap, bm->children);
-            clone->children.erase(clone->children.begin() + static_cast<difference_type>(pos));
-            clone->bitmap &= ~bit;
-            return clone;
+            return make_bitmap_erase(gen, bm, pos, bit);
         }
         }
         return n;
     }
 
-    struct find_result
+    static bool find_in(const node* cur, std::uint64_t h, const Key& k)
     {
-        const node* node = nullptr;
-        std::size_t entry = 0;
-    };
-
-    static find_result find_in(const node* cur, std::uint64_t h, const Key& k)
-    {
+        std::size_t depth = 0;
         for (;;) {
             switch (cur->kind) {
             case node::kind_t::bitmap: {
-                const auto* bm = static_cast<const bitmap_node*>(cur);
-                const std::uint32_t bit = detail::bit_for(h, bm->depth);
+                const bitmap_node* bm = as_bitmap(cur);
+                const std::uint32_t bit = detail::bit_for(h, depth);
                 if ((bm->bitmap & bit) == 0)
-                    return {};
+                    return false;
                 const std::size_t pos =
                     static_cast<std::size_t>(std::popcount(bm->bitmap & (bit - 1)));
-                cur = bm->children[pos].get();
+                cur = bm->children()[pos].get();
+                ++depth;
                 break;
             }
             case node::kind_t::leaf: {
-                const auto* leaf = static_cast<const leaf_node*>(cur);
-                if (Equal{}(k, Traits::key_of(leaf->entry)))
-                    return {cur, 0};
-                return {};
+                const leaf_node* leaf = as_leaf(cur);
+                return Equal{}(k, Traits::key_of(leaf->entry));
             }
             case node::kind_t::collision: {
-                const auto* col = static_cast<const collision_node*>(cur);
-                std::size_t i = 0;
+                const collision_node* col = as_collision(cur);
                 for (const auto& x : col->entries) {
                     if (Equal{}(k, Traits::key_of(x)))
-                        return {cur, i};
-                    ++i;
+                        return true;
                 }
-                return {};
+                return false;
             }
             }
         }
     }
 
-    static std::pair<std::vector<frame>, node_ptr> descend(node_ptr n)
+    struct frame
+    {
+        const bitmap_node* parent;
+        std::size_t index;
+        bool operator==(const frame& other) const noexcept
+        {
+            return parent == other.parent && index == other.index;
+        }
+    };
+
+    static std::pair<std::vector<frame>, const node*> descend(const node* n)
     {
         std::vector<frame> path;
         while (n->kind == node::kind_t::bitmap) {
             const bitmap_node* bm = as_bitmap(n);
-            path.push_back(frame{n, 0});
-            n = bm->children[0];
+            path.push_back(frame{bm, 0});
+            n = bm->children()[0].get();
         }
-        return {std::move(path), std::move(n)};
+        return {std::move(path), n};
     }
 
 public:
@@ -448,10 +647,9 @@ public:
         reference operator*() const
         {
             if (node_->kind == node::kind_t::leaf)
-                return as_leaf(node_)->entry;
+                return Traits::to_exposed(as_leaf(node_)->entry);
             assert(node_->kind == node::kind_t::collision);
-            const collision_node* col = as_collision(node_);
-            return *std::next(col->entries.begin(), static_cast<std::ptrdiff_t>(entry_));
+            return Traits::to_exposed(as_collision(node_)->entries[entry_]);
         }
 
         pointer operator->() const
@@ -470,16 +668,16 @@ public:
             }
             while (!path_.empty()) {
                 frame& f = path_.back();
-                const bitmap_node* bm = as_bitmap(f.parent);
-                if (f.index + 1 < bm->children.size()) {
+                const bitmap_node* bm = f.parent;
+                if (f.index + 1 < bm->count()) {
                     ++f.index;
-                    node_ptr n = bm->children[f.index];
+                    const node* n = bm->children()[f.index].get();
                     while (n->kind == node::kind_t::bitmap) {
                         const bitmap_node* b = as_bitmap(n);
-                        path_.push_back(frame{n, 0});
-                        n = b->children[0];
+                        path_.push_back(frame{b, 0});
+                        n = b->children()[0].get();
                     }
-                    node_ = std::move(n);
+                    node_ = n;
                     entry_ = 0;
                     return *this;
                 }
@@ -513,12 +711,20 @@ public:
     private:
         friend hamt_common;
 
+        node_ptr root_;
         std::vector<frame> path_;
-        node_ptr node_;
+        const node* node_ = nullptr;
         std::size_t entry_ = 0;
 
-        const_iterator(std::vector<frame> path, node_ptr n, std::size_t entry)
-            : path_(std::move(path)), node_(std::move(n)), entry_(entry) {}
+        const_iterator(node_ptr root, std::vector<frame> path, const node* n, std::size_t entry)
+            : root_(std::move(root)), path_(std::move(path)), node_(n), entry_(entry) {}
+
+        [[nodiscard]] std::uint64_t hash() const noexcept
+        {
+            return node_->kind == node::kind_t::leaf
+                       ? as_leaf(node_)->hash
+                       : as_collision(node_)->hash;
+        }
     };
 
     using iterator = const_iterator;
@@ -544,8 +750,8 @@ public:
     {
         if (root_ == nullptr)
             return const_iterator();
-        auto [path, n] = descend(root_);
-        return const_iterator(std::move(path), std::move(n), 0);
+        auto [path, n] = descend(root_.get());
+        return const_iterator(root_, std::move(path), n, 0);
     }
 
     [[nodiscard]] const_iterator end() const noexcept
@@ -558,28 +764,48 @@ public:
         if (root_ == nullptr)
             return const_iterator();
         const std::uint64_t h = hash_of(k);
-        const find_result hit = find_in(root_.get(), h, k);
-        if (hit.node == nullptr)
-            return const_iterator();
+        const node* cur = root_.get();
+        std::size_t depth = 0;
         std::vector<frame> path;
-        node_ptr cur = root_;
-        while (cur.get() != hit.node) {
-            const bitmap_node* bm = as_bitmap(cur);
-            const std::uint32_t bit = detail::bit_for(h, bm->depth);
-            const std::size_t pos =
-                static_cast<std::size_t>(std::popcount(bm->bitmap & (bit - 1)));
-            node_ptr next = bm->children[pos];
-            path.push_back(frame{std::move(cur), pos});
-            cur = std::move(next);
+        for (;;) {
+            switch (cur->kind) {
+            case node::kind_t::bitmap: {
+                const bitmap_node* bm = as_bitmap(cur);
+                const std::uint32_t bit = detail::bit_for(h, depth);
+                if ((bm->bitmap & bit) == 0)
+                    return const_iterator();
+                const std::size_t pos =
+                    static_cast<std::size_t>(std::popcount(bm->bitmap & (bit - 1)));
+                path.push_back(frame{bm, pos});
+                cur = bm->children()[pos].get();
+                ++depth;
+                break;
+            }
+            case node::kind_t::leaf: {
+                const leaf_node* leaf = as_leaf(cur);
+                if (Equal{}(k, Traits::key_of(leaf->entry)))
+                    return const_iterator(root_, std::move(path), leaf, 0);
+                return const_iterator();
+            }
+            case node::kind_t::collision: {
+                const collision_node* col = as_collision(cur);
+                std::size_t i = 0;
+                for (const auto& x : col->entries) {
+                    if (Equal{}(k, Traits::key_of(x)))
+                        return const_iterator(root_, std::move(path), col, i);
+                    ++i;
+                }
+                return const_iterator();
+            }
+            }
         }
-        return const_iterator(std::move(path), std::move(cur), hit.entry);
     }
 
     [[nodiscard]] bool contains(const Key& k) const
     {
         if (root_ == nullptr)
             return false;
-        return find_in(root_.get(), hash_of(k), k).node != nullptr;
+        return find_in(root_.get(), hash_of(k), k);
     }
 
     [[nodiscard]] size_type count(const Key& k) const
@@ -595,7 +821,7 @@ public:
 
     void swap(Derived& other) noexcept
     {
-        root_.swap(other.root_);
+        std::swap(root_, other.root_);
         std::swap(size_, other.size_);
         std::swap(gen_, other.gen_);
     }
@@ -637,7 +863,7 @@ protected:
     {
         const std::uint64_t h = hash_of(Traits::key_of(e));
         if (root_ == nullptr) {
-            root_ = std::make_shared<leaf_node>(gen_, h, std::move(e));
+            root_ = make_leaf(gen_, h, std::move(e));
             ++size_;
             return self();
         }
@@ -674,16 +900,41 @@ protected:
     {
         if (a.size_ != b.size_)
             return false;
-        for (const auto& kv : a) {
-            const auto it = b.find(Traits::key_of(kv));
-            if (it == b.end())
+        auto ia = a.begin();
+        auto ib = b.begin();
+        const auto ea = a.end();
+        const auto eb = b.end();
+        while (ia != ea && ib != eb) {
+            const std::uint64_t h = ia.hash();
+            if (ib.hash() != h)
                 return false;
-            if constexpr (Traits::value_comparable) {
-                if (!Traits::same_value(kv.second, it->second))
+            std::vector<const Key*> bkeys;
+            std::vector<const typename Traits::mapped_type*> bvals;
+            while (ib != eb && ib.hash() == h) {
+                bkeys.push_back(std::addressof(Traits::key_of(*ib)));
+                if constexpr (Traits::value_comparable)
+                    bvals.push_back(std::addressof((*ib).second));
+                ++ib;
+            }
+            while (ia != ea && ia.hash() == h) {
+                const Key& ak = Traits::key_of(*ia);
+                bool matched = false;
+                for (std::size_t j = 0; j < bkeys.size(); ++j) {
+                    if (Equal{}(ak, *bkeys[j])) {
+                        if constexpr (Traits::value_comparable) {
+                            if (!Traits::same_value((*ia).second, *bvals[j]))
+                                return false;
+                        }
+                        matched = true;
+                        break;
+                    }
+                }
+                if (!matched)
                     return false;
+                ++ia;
             }
         }
-        return true;
+        return ia == ea && ib == eb;
     }
 
 private:
