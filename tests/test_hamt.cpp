@@ -518,6 +518,32 @@ static void test_equality()
     CHECK(empty1 == empty2);
 }
 
+static void test_equality_collision_order()
+{
+    struct zero_hash
+    {
+        std::uint64_t operator()(std::uint64_t) const noexcept { return 0; }
+    };
+    using cmap_t = hamt::hamt_map<std::uint64_t, std::uint64_t, zero_hash>;
+    cmap_t a;
+    cmap_t b;
+    a.insert(1, 10).insert(2, 20).insert(3, 30);
+    b.insert(3, 30).insert(1, 10).insert(2, 20);
+    CHECK(a == b);
+    CHECK(!(a != b));
+    b.insert(2, 99);
+    CHECK(a != b);
+    using cset_t = hamt::hamt_set<std::uint64_t, zero_hash>;
+    cset_t s1;
+    cset_t s2;
+    s1.insert(1).insert(2).insert(3);
+    s2.insert(3).insert(2).insert(1);
+    CHECK(s1 == s2);
+    CHECK(!(s1 != s2));
+    s2.erase(2);
+    CHECK(s1 != s2);
+}
+
 static void test_iterator_snapshot_stability()
 {
     map_t m;
@@ -1081,6 +1107,7 @@ int main()
     test_set_clear();
     test_set_swap();
     test_set_equality();
+    test_equality_collision_order();
     test_set_move();
     test_set_custom_equal();
     test_set_string_keys();
